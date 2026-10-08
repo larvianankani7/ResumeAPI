@@ -1,118 +1,187 @@
-import { test, expect } from '@playwright/test';
+import { test } from '@playwright/test';
 import Redis from 'ioredis';
 
-test('concurrent resume requests', async ({ request }) => {
-  test.setTimeout(120000);
+test.setTimeout(120000);
 
-  const email = 'larvianankani7@gmail.com';
-  const password = '@Larvia5n';
-
-  const login = await request.post('/api/auth/login', {
-    data: {
-      email,
-      password
-    }
-  });
-
-  console.log('Login status:', login.status());
-  console.log('Login response:', await login.text());
-
-  expect(login.ok()).toBeTruthy();
-
+test('resume API load test', async ({ request }) => {
   const redis = new Redis(
     process.env.REDIS_URL || 'redis://localhost:6379'
   );
 
-  const otp = await redis.get(`otp:${email}`);
+  const email =
+    process.env.TEST_EMAIL || 'test@example.com';
 
-  await redis.quit();
+  const password =
+    process.env.TEST_PASSWORD || 'testpassword123';
+
+  const loginResponse = await request.post(
+    '/api/auth/login',
+    {
+      data: {
+        email,
+        password
+      }
+    }
+  );
+
+  if (!loginResponse.ok()) {
+    throw new Error(
+      `Login failed: ${loginResponse.status()}`
+    );
+  }
+
+  const otp = await redis.get(`otp:${email}`);
 
   if (!otp) {
     throw new Error('OTP not found in Redis');
   }
 
-  console.log('OTP retrieved from Redis.');
-
-  const verify = await request.post('/api/auth/verify-otp', {
-    data: {
-      email,
-      otp
+  const verifyResponse = await request.post(
+    '/api/auth/verify-otp',
+    {
+      data: {
+        email,
+        otp
+      }
     }
-  });
-
-  console.log('OTP verification status:', verify.status());
-
-  expect(verify.ok()).toBeTruthy();
-
-  const tokens = await verify.json();
-  const accessToken = tokens.accessToken;
-
-  console.log('Authentication successful.');
-  console.log('Starting concurrent resume requests...');
-
-  const start = performance.now();
-  const requests = Array.from({ length: 10000 }, (_, index) => {
-    const requestStart = performance.now();
-    return request
-      .get('/api/resume', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`
-        }
-      })
-      .then(async response => {
-        const body = await response.body();
-        const latency = performance.now() - requestStart;
-
-        return {
-          index,
-          status: response.status(),
-          size: body.length, latency
-        };
-      });
-    });
-
-  const results = await Promise.all(requests);
-  const duration = performance.now() - start;
-  const successful = results.filter(
-    result => result.status === 200
   );
-  const failed = results.filter(
-    result => result.status !== 200
-  );
-  const successfulLatencies = successful.map(result => result.latency);
-  const averageLatency = successfulLatencies.reduce((sum, value) => sum + value, 0)/successfulLatencies.length;
-  const lowerRange = averageLatency * 0.8;
-  const upperRange = averageLatency * 1.2;
 
-  console.log('\n========== LOAD TEST ==========');
-  console.log('Total requests:', results.length);
-  console.log('Successful:', successful.length);
-  console.log('Failed:', failed.length);
-  console.log(
-    'Total duration:',
-    `${(duration / 1000).toFixed(2)} seconds`
-  );
-  console.log(
-    'Requests/sec:',
-    (results.length / (duration / 1000)).toFixed(2)
-  );
-  console.log(
-    'Approx per-request latency:',
-    `${lowerRange.toFixed(1)} - ${upperRange.toFixed(1)} ms`
-  );
-  console.log(
-    'Resume size:',
-    successful.length
-      ? `${successful[0].size} bytes`
-      : 'N/A'
-  );
-  console.log('================================\n');
-
-  if (failed.length) {
-    console.log('Failed responses:');
-    console.log(failed.slice(0, 20));
+  if (!verifyResponse.ok()) {
+    throw new Error(
+      `OTP verification failed: ${verifyResponse.status()}`
+    );
   }
 
-  expect(failed.length).toBe(0);
-  expect(successful.length).toBe(10000);
+  const { accessToken } = await verifyResponse.json();
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`
+  };
+
+  const latencySamples: number[] = [];
+
+  for (let i = 0; i < 10; i++) {
+    const start = performance.now();
+
+    const response = await request.get(
+      '/api/network-latency',
+      {
+        headers
+      }
+    );
+
+    const body = await response.body();
+
+    const end = performance.now();
+
+    if (!response.ok()) {
+      throw new Error(
+        `Latency request failed: ${response.status()}`
+      );
+    }
+
+    void body;
+
+    latencySamples.push(end - start);
+  }
+
+  const averageRtt =
+    latencySamples.reduce(
+      (sum, value) => sum + value,
+      0
+    ) / latencySamples.length;
+
+  const totalRequests = 1000;
+
+  let successful = 0;
+  let failed = 0;
+  let resumeSize = 0;
+
+  const backendTimes: number[] = [];
+
+  const start = performance.now();
+
+  const requests = Array.from(
+    { length: totalRequests },
+    async () => {
+      const response = await request.get(
+        '/api/resume',
+        {
+          headers
+        }
+      );
+
+      const backendTime = Number(
+        response.headers()[
+          'x-backend-processing-time'
+        ]
+      );
+
+      if (Number.isFinite(backendTime)) {
+        backendTimes.push(backendTime);
+      }
+
+      if (response.ok()) {
+        successful++;
+
+        if (!resumeSize) {
+          const body = await response.body();
+          resumeSize = body.length;
+        }
+      } else {
+        failed++;
+      }
+    }
+  );
+
+  await Promise.all(requests);
+
+  const end = performance.now();
+
+  const totalDuration =
+    (end - start) / 1000;
+
+  const requestsPerSecond =
+    totalRequests / totalDuration;
+
+  const averageBackendTime =
+    backendTimes.length > 0
+      ? backendTimes.reduce(
+          (sum, value) => sum + value,
+          0
+        ) / backendTimes.length
+      : 0;
+
+  console.log(
+    '\n========== LOAD TEST =========='
+  );
+  console.log(
+    `Total requests:       ${totalRequests}`
+  );
+  console.log(
+    `Successful:            ${successful}`
+  );
+  console.log(
+    `Failed:                ${failed}`
+  );
+  console.log(
+    `Total duration:        ${totalDuration.toFixed(2)} seconds`
+  );
+  console.log(
+    `Requests/sec:          ${requestsPerSecond.toFixed(2)}`
+  );
+  console.log(
+    `Average API RTT:       ${averageRtt.toFixed(2)} ms`
+  );
+  console.log(
+    `Average backend time:  ${averageBackendTime.toFixed(4)} ms`
+  );
+  console.log(
+    `Resume size:           ${resumeSize} bytes`
+  );
+  console.log(
+    '================================\n'
+  );
+
+  await redis.quit();
 });

@@ -9,6 +9,17 @@ const app = Fastify({
   logger: true
 });
 
+app.addHook('onSend', async (request, reply, payload) => {
+  const responseTime = reply.elapsedTime;
+
+  reply.header(
+    'X-Backend-Processing-Time',
+    responseTime.toFixed(4)
+  );
+
+  return payload;
+});
+
 await app.register(cors, {
   origin: 'http://localhost:5173'
 });

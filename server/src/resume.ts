@@ -56,6 +56,20 @@ async function loadResume() {
 }
 
 export async function resumeRoutes(app: FastifyInstance) {
+  app.get('/api/network-latency', async (request, reply) => {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.code(401).send({
+        error: 'Unauthorized'
+      });
+    }
+
+    return {
+      ok: true
+    };
+  });
+
   app.get('/api/resume', async (request, reply) => {
     try {
       await request.jwtVerify();
@@ -73,7 +87,10 @@ export async function resumeRoutes(app: FastifyInstance) {
         'Content-Disposition',
         'attachment; filename="resume.pdf"'
       )
-      .header('Cache-Control', 'private, max-age=300')
+      .header(
+        'Cache-Control',
+        'private, max-age=300'
+      )
       .send(resume);
   });
 
