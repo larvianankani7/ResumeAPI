@@ -1,8 +1,9 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, preHandlerHookHandler } from 'fastify';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { redis } from './redis.js';
+import { consumeUserRateLimit } from './utils.js';
 
 const resumePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -16,6 +17,49 @@ let memoryHits = 0;
 let redisHits = 0;
 let diskReads = 0;
 let singleFlightWaits = 0;
+
+const authenticateAndRateLimit: preHandlerHookHandler = async (
+  request,
+  reply
+) => {
+  try {
+    await request.jwtVerify();
+  } catch {
+    return reply.code(401).send({
+      error: 'Unauthorized'
+    });
+  }
+
+  const claims = request.user as {
+    sub?: string;
+    type?: string;
+  };
+
+  if (!claims.sub || claims.type === 'refresh') {
+    return reply.code(401).send({
+      error: 'Unauthorized'
+    });
+  }
+
+  try {
+    const result = await consumeUserRateLimit(claims.sub);
+
+    if (!result.allowed) {
+      return reply
+        .header('Retry-After', String(result.retryAfterSeconds))
+        .code(429)
+        .send({
+          error: 'Too many requests'
+        });
+    }
+  } catch (error) {
+    request.log.error({ err: error }, 'Rate limiter unavailable');
+
+    return reply.code(503).send({
+      error: 'Rate limiter unavailable'
+    });
+  }
+};
 
 async function loadResume() {
   if (memoryCache) {
@@ -56,29 +100,17 @@ async function loadResume() {
 }
 
 export async function resumeRoutes(app: FastifyInstance) {
-  app.get('/api/network-latency', async (request, reply) => {
-    try {
-      await request.jwtVerify();
-    } catch {
-      return reply.code(401).send({
-        error: 'Unauthorized'
-      });
-    }
-
+  app.get('/api/network-latency', {
+    preHandler: authenticateAndRateLimit
+  }, async () => {
     return {
       ok: true
     };
   });
 
-  app.get('/api/resume', async (request, reply) => {
-    try {
-      await request.jwtVerify();
-    } catch {
-      return reply.code(401).send({
-        error: 'Unauthorized'
-      });
-    }
-
+  app.get('/api/resume', {
+    preHandler: authenticateAndRateLimit
+  }, async (_request, reply) => {
     const resume = await loadResume();
 
     return reply

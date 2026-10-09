@@ -91,7 +91,7 @@ test('resume API load test', async ({ request }) => {
       0
     ) / latencySamples.length;
 
-  const totalRequests = 1000;
+  const totalRequests = 10000;
 
   let successful = 0;
   let failed = 0;
@@ -105,7 +105,7 @@ test('resume API load test', async ({ request }) => {
     { length: totalRequests },
     async () => {
       const response = await request.get(
-        '/api/resume',
+        '/api/auth/login',
         {
           headers
         }
